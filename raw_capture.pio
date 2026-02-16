@@ -1,0 +1,5 @@
+.program raw_capture
+
+.wrap_target
+    in pins, 1
+.wrap

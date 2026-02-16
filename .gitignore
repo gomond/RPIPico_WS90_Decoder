@@ -1,0 +1,11 @@
+build
+!.vscode/*
+pico-sdk/
+generated/
+*.uf2
+*.elf
+*.bin
+*.dis
+*.map
+*.log
+*.jsonl
