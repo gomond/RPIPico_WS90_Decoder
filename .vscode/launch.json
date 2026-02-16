@@ -1,0 +1,54 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    
+    {
+      "name": "Debug Pico with Black Magic Probe",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "bmp",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/RPIPico_WS90_Decoder.elf",
+      "BMPGDBSerialPort": "\\\\.\\COM12",
+      "interface": "swd",
+      "targetId": 1,
+      "device": "RP2040",
+      "svdFile": "${workspaceFolder}/rp2040.svd",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "Compile Project",
+      "showDevDebugOutput": "raw"
+    },
+    {
+      "name": "Debug Pico with Black Magic Probe (COM13)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "bmp",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/RPIPico_WS90_Decoder.elf",
+      "BMPGDBSerialPort": "\\\\.\\COM13",
+      "interface": "swd",
+      "targetId": 1,
+      "device": "RP2040",
+      "svdFile": "${workspaceFolder}/rp2040.svd",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "Compile Project",
+      "showDevDebugOutput": "raw"
+    },
+    {
+      "name": "Debug Pico with Black Magic Probe (COM14)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "bmp",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/RPIPico_WS90_Decoder.elf",
+      "BMPGDBSerialPort": "\\\\.\\COM14",
+      "interface": "swd",
+      "targetId": 1,
+      "device": "RP2040",
+      "svdFile": "${workspaceFolder}/rp2040.svd",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "Compile Project",
+      "showDevDebugOutput": "raw"
+    }
+  ]
+}
