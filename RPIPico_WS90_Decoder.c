@@ -6,6 +6,16 @@
 #include "hardware/clocks.h"
 #include "raw_capture.pio.h"
 
+/*
+ * WS90 decoder for Raspberry Pi Pico + RFM69.
+ *
+ * Big-picture flow:
+ * 1) Configure RFM69 in packet mode and wait for payload-ready events.
+ * 2) Try to decode each 32-byte capture using WS90 framing, ID checks, CRC, and checksum.
+ * 3) If packet mode keeps failing, fall back to raw mode + PIO sampling.
+ * 4) In raw mode, reconstruct bits from oversampled input and periodically retune.
+ */
+
 #define PIN_MISO 16
 #define PIN_MOSI 19
 #define PIN_SCK  18
@@ -64,7 +74,15 @@
 #define HEARTBEAT_IDLE_MS      10000u
 #define WS90_OUTPUT_JSON       1
 
+/*
+ * Important runtime switches:
+ * - WS90_REQUIRE_EXPECTED_ID: only accept frames from your known station ID.
+ * - WS90_OUTPUT_JSON: print one machine-readable JSON line per valid frame.
+ * - STREAM_INVALID_FRAMES: print undecodable raw frames for troubleshooting.
+ */
+
 typedef struct {
+    // Decoder state machine and signal-history fields.
     uint8_t state;
     bool have_last;
     bool last_bit;
@@ -86,12 +104,16 @@ typedef struct {
 } ws90_decoder_t;
 
 enum {
+    // Look for alternating preamble bits (AAAA...).
     DECODER_SEARCH_PREAMBLE = 0,
+    // After preamble, search for WS90 sync word (2DD4).
     DECODER_SEARCH_SYNC = 1,
+    // Once sync is found, collect the fixed 32-byte payload.
     DECODER_COLLECT_PAYLOAD = 2,
 };
 
 static inline void rfm_write(uint8_t addr, uint8_t value) {
+    // RFM69 write: set MSB in register address to indicate write operation.
     uint8_t reg = addr | 0x80;
     gpio_put(PIN_CS, 0);
     spi_write_blocking(spi0, &reg, 1);
@@ -100,6 +122,7 @@ static inline void rfm_write(uint8_t addr, uint8_t value) {
 }
 
 static inline uint8_t rfm_read(uint8_t addr) {
+    // RFM69 read: clear MSB in register address to indicate read operation.
     uint8_t tx[2] = { (uint8_t)(addr & 0x7F), 0x00 };
     uint8_t rx[2] = { 0, 0 };
     gpio_put(PIN_CS, 0);
@@ -109,10 +132,12 @@ static inline uint8_t rfm_read(uint8_t addr) {
 }
 
 static void rfm_set_mode(uint8_t mode) {
+    // Update only the mode bits inside OPMODE register.
     uint8_t op = rfm_read(RFM69_REG_OPMODE);
     op = (uint8_t)((op & (uint8_t)~RFM69_OPMODE_MASK) | (mode & RFM69_OPMODE_MASK));
     rfm_write(RFM69_REG_OPMODE, op);
 
+    // Wait for ModeReady so later register/data operations are stable.
     for (uint32_t i = 0; i < 20; i++) {
         uint8_t irq1 = rfm_read(RFM69_REG_IRQFLAGS1);
         if (irq1 & 0x80u) {
@@ -123,6 +148,7 @@ static void rfm_set_mode(uint8_t mode) {
 }
 
 static inline void rfm_read_fifo(uint8_t *buffer, size_t len) {
+    // Sequential read from FIFO starting at address 0x00.
     uint8_t reg = (uint8_t)(RFM69_REG_FIFO & 0x7F);
     gpio_put(PIN_CS, 0);
     spi_write_blocking(spi0, &reg, 1);
@@ -131,6 +157,7 @@ static inline void rfm_read_fifo(uint8_t *buffer, size_t len) {
 }
 
 static void rfm_write_bitrate(uint32_t bitrate_bps) {
+    // RFM69 bitrate register uses: bitrate = FXOSC / bitrate_reg (FXOSC=32MHz).
     uint32_t bitrate_reg = (32000000u + (bitrate_bps / 2u)) / bitrate_bps;
     if (bitrate_reg > 0xFFFFu) {
         bitrate_reg = 0xFFFFu;
@@ -140,6 +167,7 @@ static void rfm_write_bitrate(uint32_t bitrate_bps) {
 }
 
 static void rfm_write_frequency_hz(uint32_t freq_hz) {
+    // Convert Hz to FRF register value (datasheet formula).
     uint64_t frf = (((uint64_t)freq_hz) << 19) / 32000000ull;
     rfm_write(RFM69_REG_FRFMSB, (uint8_t)((frf >> 16) & 0xFFu));
     rfm_write(RFM69_REG_FRFMID, (uint8_t)((frf >> 8) & 0xFFu));
@@ -147,6 +175,7 @@ static void rfm_write_frequency_hz(uint32_t freq_hz) {
 }
 
 static void rfm_set_sync_profile(uint8_t profile) {
+    // Different sync profiles are useful when field conditions vary.
     switch (profile) {
         case 0:
             // 4-byte sync AA AA 2D D4, tolerance 1
@@ -173,6 +202,7 @@ static void rfm_set_sync_profile(uint8_t profile) {
 }
 
 static void rfm_set_continuous_data_mode(void) {
+    // Raw mode: disable packet/sync engine and output demodulated stream on DIO2.
     rfm_set_mode(RFM69_MODE_STDBY);
     rfm_write(RFM69_REG_DATAMODUL, 0x40);
     rfm_write(RFM69_REG_SYNCCONFIG, 0x00);
@@ -181,12 +211,14 @@ static void rfm_set_continuous_data_mode(void) {
 }
 
 static void rfm_set_raw_bitrate(uint32_t bitrate_bps) {
+    // In raw mode we still tune demod clock by changing bitrate register.
     rfm_set_mode(RFM69_MODE_STDBY);
     rfm_write_bitrate(bitrate_bps);
     rfm_set_mode(RFM69_MODE_RX);
 }
 
 static void rfm_reset(void) {
+    // Hardware reset pulse for known-good startup state.
     gpio_put(PIN_RST, 1);
     sleep_ms(1);
     gpio_put(PIN_RST, 0);
@@ -194,6 +226,7 @@ static void rfm_reset(void) {
 }
 
 static void rfm_init(void) {
+    // Main packet-mode configuration used during normal operation.
     // Standby
     rfm_set_mode(RFM69_MODE_STDBY);
     sleep_ms(5);
@@ -241,6 +274,7 @@ static void rfm_init(void) {
 }
 
 static void decoder_reset(ws90_decoder_t *decoder) {
+    // Reset state machine and working buffers for a fresh frame search.
     memset(decoder, 0, sizeof(*decoder));
     decoder->state = DECODER_SEARCH_PREAMBLE;
 }
@@ -261,6 +295,7 @@ static inline void decoder_track_sample(ws90_decoder_t *decoder, bool sample_bit
 }
 
 static uint8_t ws90_crc8(const uint8_t *data, size_t len, uint8_t poly, uint8_t init) {
+    // Bitwise CRC8 (rtl_433 compatible settings for WS90).
     uint8_t crc = init;
     for (size_t i = 0; i < len; i++) {
         crc ^= data[i];
@@ -276,6 +311,7 @@ static uint8_t ws90_crc8(const uint8_t *data, size_t len, uint8_t poly, uint8_t 
 }
 
 static uint8_t ws90_add_bytes(const uint8_t *data, size_t len) {
+    // WS90 also carries an additive checksum in the last byte.
     uint16_t sum = 0;
     for (size_t i = 0; i < len; i++) {
         sum += data[i];
@@ -284,6 +320,7 @@ static uint8_t ws90_add_bytes(const uint8_t *data, size_t len) {
 }
 
 static uint8_t ws90_reverse8(uint8_t x) {
+    // Reverse bit order in one byte (e.g. abcdefgh -> hgfedcba).
     x = (uint8_t)(((x & 0xF0u) >> 4) | ((x & 0x0Fu) << 4));
     x = (uint8_t)(((x & 0xCCu) >> 2) | ((x & 0x33u) << 2));
     x = (uint8_t)(((x & 0xAAu) >> 1) | ((x & 0x55u) << 1));
@@ -291,6 +328,7 @@ static uint8_t ws90_reverse8(uint8_t x) {
 }
 
 static void shift_left_bits_len(const uint8_t *in, uint8_t *out, uint32_t len, uint8_t bits) {
+    // Bit-shift an entire byte array left by N bits (N=1..7) for re-alignment tests.
     if (bits == 0u) {
         memcpy(out, in, len);
         return;
@@ -302,6 +340,7 @@ static void shift_left_bits_len(const uint8_t *in, uint8_t *out, uint32_t len, u
 }
 
 static void shift_right_bits_len(const uint8_t *in, uint8_t *out, uint32_t len, uint8_t bits) {
+    // Bit-shift an entire byte array right by N bits (N=1..7) for re-alignment tests.
     if (bits == 0u) {
         memcpy(out, in, len);
         return;
@@ -321,12 +360,14 @@ static void ws90_shift_right_bits(const uint8_t *in, uint8_t *out, uint8_t bits)
 }
 
 static bool ws90_decode_and_print(const uint8_t *b) {
+    // Fast header check: WS90 family byte must be 0x90.
     if (b[0] != 0x90u) {
         return false;
     }
 
     int id = (b[1] << 16) | (b[2] << 8) | b[3];
 #if WS90_REQUIRE_EXPECTED_ID
+    // Optional hard filter: ignore other nearby weather stations.
     if (id != (int)WS90_EXPECTED_ID) {
         return false;
     }
@@ -337,6 +378,8 @@ static bool ws90_decode_and_print(const uint8_t *b) {
     if ((crc != 0u) || (chk != b[31])) {
         return false;
     }
+
+    // At this point frame integrity is good; map payload bytes into engineering values.
 
     int light_raw = (b[4] << 8) | b[5];
     float light_lux = light_raw * 10.0f;
@@ -362,6 +405,7 @@ static bool ws90_decode_and_print(const uint8_t *b) {
     snprintf(extra, sizeof(extra), "%02x%02x%02x%02x%02x------%02x%02x%02x%02x%02x%02x%02x",
              b[14], b[15], b[16], b[17], b[18], b[22], b[23], b[24], b[25], b[26], b[27], b[28]);
 #if WS90_OUTPUT_JSON
+    // JSON mode: one compact line per valid packet for easy ingestion/logging.
     printf("{\"model\":\"Fineoffset-WS90\",\"id\":\"%06X\",\"battery_level\":%.3f,\"battery_mv\":%d,\"temperature_c\":%.1f,\"humidity\":%d,\"wind_dir_deg\":%d,\"wind_avg_m_s\":%.1f,\"wind_max_m_s\":%.1f,\"uv_index\":%.1f,\"light_lux\":%.1f,\"flags\":\"%02x\",\"rain_mm\":%.1f,\"rain_start\":%d,\"supercap_v\":%.1f,\"firmware\":%d,\"extra\":\"%s\",\"mic\":\"CRC\"}\n",
            id,
            (double)(battery_lvl * 0.01f),
@@ -404,6 +448,7 @@ static bool ws90_decode_and_print(const uint8_t *b) {
 }
 
 static bool ws90_decode_expected_id_fallback(const uint8_t *b, const char *tag) {
+    // Diagnostic path: same field mapping, but allows CRC/checksum failure printouts.
     if (b[0] != 0x90u) {
         return false;
     }
@@ -461,6 +506,8 @@ static bool ws90_decode_expected_id_fallback(const uint8_t *b, const char *tag) 
 }
 
 static bool ws90_decode_id_anchored_stream(const uint8_t *buf, uint32_t len, const char *tag) {
+    // Search all 32-byte windows for the known station ID at bytes [1..3].
+    // This is useful when sync/framing is close but not perfect.
     if (len < WS90_FRAME_BYTES) {
         return false;
     }
@@ -483,6 +530,8 @@ static bool ws90_decode_id_anchored_stream(const uint8_t *buf, uint32_t len, con
 }
 
 static bool ws90_decode_with_alignment(const uint8_t *raw) {
+    // Try multiple transform families to recover frames from slight bit/byte misalignment.
+    // Order: raw -> invert -> bit-reverse -> bit-reverse+invert, with rotations/shifts.
     uint8_t base[WS90_FRAME_BYTES];
     uint8_t shifted[WS90_FRAME_BYTES];
     uint8_t rotated[WS90_FRAME_BYTES];
@@ -617,6 +666,11 @@ static bool handle_frame_bytes(const uint8_t *frame) {
 }
 
 static bool handle_capture_bytes(const uint8_t *capture, uint32_t capture_len) {
+    // Packet-mode capture handler:
+    // 1) apply transform/shift search,
+    // 2) attempt ID-anchored decoding,
+    // 3) attempt full alignment decode,
+    // 4) print raw frame for debug if still invalid.
     uint8_t transformed[RFM_CAPTURE_BYTES];
     uint8_t shifted[RFM_CAPTURE_BYTES];
 
@@ -680,6 +734,7 @@ static bool handle_capture_bytes(const uint8_t *capture, uint32_t capture_len) {
 }
 
 static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
+    // Core state machine that converts a bit stream into a 32-byte frame.
     switch (decoder->state) {
         case DECODER_SEARCH_PREAMBLE:
             if (!decoder->have_last) {
@@ -689,6 +744,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
                 return false;
             }
 
+            // Preamble is alternating bits (101010...), so transitions are important.
             if (bit != decoder->last_bit) {
                 decoder->alt_run++;
             } else {
@@ -701,6 +757,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
 
             decoder->sync_shift = (decoder->sync_shift << 1) | (bit ? 1u : 0u);
 
+            // Fast path: sometimes we see full AAAA2DD4 in one rolling window.
             if (decoder->sync_shift == WS90_PREAMBLE_SYNC_32) {
                 decoder->state = DECODER_COLLECT_PAYLOAD;
                 decoder->frame_bits = 0;
@@ -708,6 +765,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
                 break;
             }
 
+            // Once enough alternating bits are seen, start sync search phase.
             if (decoder->alt_run >= WS90_PREAMBLE_MIN_BITS) {
                 decoder->state = DECODER_SEARCH_SYNC;
                 decoder->sync_shift = 0;
@@ -716,6 +774,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
             return false;
 
         case DECODER_SEARCH_SYNC:
+            // Slide a 16-bit window to find sync word 0x2DD4.
             decoder->sync_shift = ((decoder->sync_shift << 1) | (bit ? 1u : 0u)) & ((1u << WS90_SYNC_BITS) - 1u);
             if ((decoder->sync_shift & 0xFFFFu) == WS90_SYNC_WORD) {
                 decoder->state = DECODER_COLLECT_PAYLOAD;
@@ -727,6 +786,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
             if (decoder->sync_window > 0u) {
                 decoder->sync_window--;
             }
+            // Give up after a bounded window to avoid getting stuck forever.
             if (decoder->sync_window == 0u) {
                 decoder->state = DECODER_SEARCH_PREAMBLE;
                 decoder->have_last = true;
@@ -736,6 +796,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
             return false;
 
         case DECODER_COLLECT_PAYLOAD: {
+            // Pack bits MSB-first into a fixed 32-byte frame buffer.
             uint32_t bit_index = decoder->frame_bits;
             uint32_t byte_index = bit_index >> 3;
             uint32_t bit_in_byte = 7u - (bit_index & 7u);
@@ -760,6 +821,7 @@ static bool decoder_handle_bit(ws90_decoder_t *decoder, bool bit) {
 }
 
 static inline bool decoder_handle_sample(ws90_decoder_t *decoder, bool sample_bit) {
+    // Raw mode oversamples each symbol; majority vote converts samples -> one bit.
     decoder_track_sample(decoder, sample_bit);
     decoder->sample_acc += sample_bit ? 1u : 0u;
     decoder->sample_count++;
@@ -773,6 +835,7 @@ static inline bool decoder_handle_sample(ws90_decoder_t *decoder, bool sample_bi
 }
 
 static bool process_sample_word(ws90_decoder_t *decoder, uint32_t word) {
+    // PIO provides 32 sampled bits at a time; process from MSB to LSB.
     bool decoded = false;
     for (int bit = 31; bit >= 0; bit--) {
         bool sample = ((word >> bit) & 1u) != 0;
@@ -800,7 +863,7 @@ int main() {
     gpio_init(PIN_RST);
     gpio_set_dir(PIN_RST, GPIO_OUT);
 
-    // Reset + init radio
+    // Reset + init radio in packet mode (normal path).
     rfm_reset();
     rfm_init();
 
@@ -832,6 +895,7 @@ int main() {
     uint32_t last_activity_ms = heartbeat_ms;
     while (true) {
         if (!raw_mode) {
+            // Packet-mode path: rely on RFM69 payload-ready interrupt flag.
             uint8_t opm = rfm_read(RFM69_REG_OPMODE);
             if ((opm & 0x1Cu) != RFM69_MODE_RX) {
                 rfm_set_mode(RFM69_MODE_RX);
@@ -847,6 +911,7 @@ int main() {
                     undecoded_packets = 0;
                 } else {
                     undecoded_packets++;
+                    // If packet mode repeatedly fails, switch to raw PIO decode path.
                     if (undecoded_packets >= 10u) {
                         printf("fallback: switching to raw PIO decode mode\n");
                         raw_mode = true;
@@ -865,6 +930,7 @@ int main() {
             }
         } else {
             if (!raw_ready) {
+                // Raw fallback setup: continuous demod stream + PIO sampler.
                 rfm_set_continuous_data_mode();
                 rfm_write_frequency_hz(raw_freq_profiles[raw_freq_profile]);
                 rfm_set_raw_bitrate(raw_bitrate_profiles[raw_bitrate_profile]);
@@ -899,6 +965,7 @@ int main() {
             uint32_t seen_delta = raw_decoder.frames_seen - raw_last_seen_frames;
             uint32_t decoded_delta = raw_decoder.frames_decoded - raw_last_decoded_frames;
             if ((seen_delta >= 12u) && (decoded_delta == 0u)) {
+                // Auto-retune in raw mode: sweep bitrate, then nudge center frequency.
                 raw_bitrate_profile = (raw_bitrate_profile + 1u) % (sizeof(raw_bitrate_profiles) / sizeof(raw_bitrate_profiles[0]));
                 if (raw_bitrate_profile == 0u) {
                     raw_freq_profile = (raw_freq_profile + 1u) % (sizeof(raw_freq_profiles) / sizeof(raw_freq_profiles[0]));
