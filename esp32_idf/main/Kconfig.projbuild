@@ -1,0 +1,27 @@
+menu "WS90 MQTT Configuration"
+
+config WS90_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config WS90_WIFI_PASS
+    string "Wi-Fi Password"
+    default ""
+
+config WS90_MQTT_BROKER_URI
+    string "MQTT Broker URI"
+    default "mqtt://192.168.1.10:1883"
+
+config WS90_MQTT_USERNAME
+    string "MQTT Username"
+    default ""
+
+config WS90_MQTT_PASSWORD
+    string "MQTT Password"
+    default ""
+
+config WS90_MQTT_STATE_TOPIC
+    string "MQTT State Topic"
+    default "ws90/state"
+
+endmenu

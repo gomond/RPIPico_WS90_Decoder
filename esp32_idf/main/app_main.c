@@ -17,13 +17,12 @@
 #include "driver/gpio.h"
 #include "esp_wifi.h"
 
-#define WIFI_SSID       "Omond"
-#define WIFI_PASS       "D00fyD0g"
-#define MQTT_BROKER_URI "mqtt://192.168.1.238:1883"
-#define MQTT_USER       "mqtt-user"
-#define MQTT_PASS       "hassmqtt"
-
-#define MQTT_STATE_TOPIC "ws90/state"
+#define WIFI_SSID       CONFIG_WS90_WIFI_SSID
+#define WIFI_PASS       CONFIG_WS90_WIFI_PASS
+#define MQTT_BROKER_URI CONFIG_WS90_MQTT_BROKER_URI
+#define MQTT_USER       CONFIG_WS90_MQTT_USERNAME
+#define MQTT_PASS       CONFIG_WS90_MQTT_PASSWORD
+#define MQTT_STATE_TOPIC CONFIG_WS90_MQTT_STATE_TOPIC
 
 #define PIN_MISO 16
 #define PIN_MOSI 19
@@ -78,6 +77,46 @@ static const int WIFI_CONNECTED_BIT = BIT0;
 static spi_device_handle_t rfm_spi;
 static esp_mqtt_client_handle_t mqtt_client;
 static bool mqtt_connected = false;
+
+static void mqtt_publish_discovery_sensor(const char *topic,
+                                          const char *name,
+                                          const char *unique_id,
+                                          const char *unit,
+                                          const char *device_class,
+                                          const char *state_class,
+                                          const char *value_template) {
+    if (!mqtt_connected || mqtt_client == NULL) {
+        return;
+    }
+
+    char payload[768];
+    snprintf(payload,
+             sizeof(payload),
+             "{"
+             "\"name\":\"%s\","
+             "\"uniq_id\":\"%s\","
+             "\"stat_t\":\"%s\","
+             "\"unit_of_meas\":\"%s\","
+             "\"dev_cla\":\"%s\","
+             "\"state_class\":\"%s\","
+             "\"val_tpl\":\"%s\","
+             "\"dev\":{"
+             "\"ids\":[\"ws90_decoder\"],"
+             "\"name\":\"WS90 Decoder\","
+             "\"mdl\":\"ESP32_WS90_Decoder_MQTT\","
+             "\"mf\":\"Custom\""
+             "}"
+             "}",
+             name,
+             unique_id,
+             MQTT_STATE_TOPIC,
+             unit,
+             device_class,
+             state_class,
+             value_template);
+
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 1);
+}
 
 static inline esp_err_t rfm_write(uint8_t addr, uint8_t value) {
     uint8_t tx[2] = { (uint8_t)(addr | 0x80u), value };
@@ -253,26 +292,77 @@ static void mqtt_publish_discovery(void) {
         return;
     }
 
-    const char *temp_cfg_topic = "homeassistant/sensor/ws90_temperature/config";
-    const char *hum_cfg_topic = "homeassistant/sensor/ws90_humidity/config";
-    const char *wind_cfg_topic = "homeassistant/sensor/ws90_wind_avg/config";
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_temperature/config",
+                                  "WS90 Temperature",
+                                  "ws90_temp",
+                                  "°C",
+                                  "temperature",
+                                  "measurement",
+                                  "{{ value_json.temperature_c }}");
 
-    char payload[512];
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_humidity/config",
+                                  "WS90 Humidity",
+                                  "ws90_humidity",
+                                  "%",
+                                  "humidity",
+                                  "measurement",
+                                  "{{ value_json.humidity }}");
 
-    snprintf(payload, sizeof(payload),
-             "{\"name\":\"WS90 Temperature\",\"uniq_id\":\"ws90_temp\",\"stat_t\":\"%s\",\"unit_of_meas\":\"°C\",\"dev_cla\":\"temperature\",\"val_tpl\":\"{{ value_json.temperature_c }}\",\"dev\":{\"ids\":[\"ws90_decoder\"],\"name\":\"WS90 Decoder\",\"mdl\":\"ESP32_WS90_Decoder_MQTT\",\"mf\":\"Custom\"}}",
-             MQTT_STATE_TOPIC);
-    esp_mqtt_client_publish(mqtt_client, temp_cfg_topic, payload, 0, 1, 1);
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_wind_avg/config",
+                                  "WS90 Wind Average",
+                                  "ws90_wind_avg",
+                                  "m/s",
+                                  "wind_speed",
+                                  "measurement",
+                                  "{{ value_json.wind_avg_m_s }}");
 
-    snprintf(payload, sizeof(payload),
-             "{\"name\":\"WS90 Humidity\",\"uniq_id\":\"ws90_humidity\",\"stat_t\":\"%s\",\"unit_of_meas\":\"%%\",\"dev_cla\":\"humidity\",\"val_tpl\":\"{{ value_json.humidity }}\",\"dev\":{\"ids\":[\"ws90_decoder\"]}}",
-             MQTT_STATE_TOPIC);
-    esp_mqtt_client_publish(mqtt_client, hum_cfg_topic, payload, 0, 1, 1);
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_wind_max/config",
+                                  "WS90 Wind Gust",
+                                  "ws90_wind_max",
+                                  "m/s",
+                                  "wind_speed",
+                                  "measurement",
+                                  "{{ value_json.wind_max_m_s }}");
 
-    snprintf(payload, sizeof(payload),
-             "{\"name\":\"WS90 Wind Avg\",\"uniq_id\":\"ws90_wind_avg\",\"stat_t\":\"%s\",\"unit_of_meas\":\"m/s\",\"state_class\":\"measurement\",\"val_tpl\":\"{{ value_json.wind_avg_m_s }}\",\"dev\":{\"ids\":[\"ws90_decoder\"]}}",
-             MQTT_STATE_TOPIC);
-    esp_mqtt_client_publish(mqtt_client, wind_cfg_topic, payload, 0, 1, 1);
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_wind_dir/config",
+                                  "WS90 Wind Direction",
+                                  "ws90_wind_dir",
+                                  "°",
+                                  "",
+                                  "measurement",
+                                  "{{ value_json.wind_dir_deg }}");
+
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_rain/config",
+                                  "WS90 Rain",
+                                  "ws90_rain",
+                                  "mm",
+                                  "precipitation",
+                                  "measurement",
+                                  "{{ value_json.rain_mm }}");
+
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_uv/config",
+                                  "WS90 UV Index",
+                                  "ws90_uv",
+                                  "",
+                                  "",
+                                  "measurement",
+                                  "{{ value_json.uv_index }}");
+
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_light/config",
+                                  "WS90 Illuminance",
+                                  "ws90_light",
+                                  "lx",
+                                  "illuminance",
+                                  "measurement",
+                                  "{{ value_json.light_lux }}");
+
+    mqtt_publish_discovery_sensor("homeassistant/sensor/ws90_battery/config",
+                                  "WS90 Battery",
+                                  "ws90_battery",
+                                  "%",
+                                  "battery",
+                                  "measurement",
+                                  "{{ (value_json.battery_level * 100) | round(0) }}");
 }
 
 static void mqtt_publish_state(const char *json) {
@@ -514,9 +604,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_start(void) {
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URI,
-        .credentials.username = MQTT_USER,
-        .credentials.authentication.password = MQTT_PASS,
     };
+
+    if (strlen(MQTT_USER) > 0) {
+        mqtt_cfg.credentials.username = MQTT_USER;
+        mqtt_cfg.credentials.authentication.password = MQTT_PASS;
+    }
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
@@ -602,6 +695,20 @@ static void ws90_radio_task(void *arg) {
 }
 
 void app_main(void) {
+    if (strlen(WIFI_SSID) == 0 || strlen(WIFI_PASS) == 0) {
+        ESP_LOGE(TAG, "Wi-Fi credentials missing. Set WS90_WIFI_SSID and WS90_WIFI_PASS in menuconfig.");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    if (strlen(MQTT_BROKER_URI) == 0) {
+        ESP_LOGE(TAG, "MQTT broker URI missing. Set WS90_MQTT_BROKER_URI in menuconfig.");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
