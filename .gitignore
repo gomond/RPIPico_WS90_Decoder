@@ -1,4 +1,8 @@
 build
+esp32_idf/build/
+esp32_idf/sdkconfig
+esp32_idf/sdkconfig.old
+esp32_idf/managed_components/
 !.vscode/*
 pico-sdk/
 generated/
