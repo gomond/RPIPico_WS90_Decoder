@@ -1,4 +1,4 @@
-# RPIPico WS90 Decoder
+# ESP32_WS90_Decoder_MQTT
 
 Decode FineOffset WS90 weather sensor packets on Raspberry Pi Pico using an RFM69 receiver.
 
@@ -75,7 +75,7 @@ Decode FineOffset WS90 weather sensor packets on Raspberry Pi Pico using an RFM6
 - `main`  
   Initializes Pico + radio, runs packet mode, triggers raw fallback, applies retune profiles, and prints output.
 
-## Key compile-time switches (`RPIPico_WS90_Decoder.c`)
+## Key compile-time switches (`ESP32_WS90_Decoder_MQTT.c`)
 
 - `WS90_OUTPUT_JSON`  
   `1` = JSON output, `0` = human-readable multi-line output.

@@ -28,36 +28,36 @@ set(PICO_BOARD pico CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(RPIPico_WS90_Decoder C CXX ASM)
+project(ESP32_WS90_Decoder_MQTT C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(RPIPico_WS90_Decoder RPIPico_WS90_Decoder.c )
+add_executable(ESP32_WS90_Decoder_MQTT ESP32_WS90_Decoder_MQTT.c )
 
-pico_set_program_name(RPIPico_WS90_Decoder "RPIPico_WS90_Decoder")
-pico_set_program_version(RPIPico_WS90_Decoder "0.1")
+pico_set_program_name(ESP32_WS90_Decoder_MQTT "ESP32_WS90_Decoder_MQTT")
+pico_set_program_version(ESP32_WS90_Decoder_MQTT "0.1")
 
 # Generate PIO header
-pico_generate_pio_header(RPIPico_WS90_Decoder ${CMAKE_CURRENT_LIST_DIR}/raw_capture.pio)
+pico_generate_pio_header(ESP32_WS90_Decoder_MQTT ${CMAKE_CURRENT_LIST_DIR}/raw_capture.pio)
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(RPIPico_WS90_Decoder 0)
-pico_enable_stdio_usb(RPIPico_WS90_Decoder 1)
+pico_enable_stdio_uart(ESP32_WS90_Decoder_MQTT 0)
+pico_enable_stdio_usb(ESP32_WS90_Decoder_MQTT 1)
 
 # Add the standard library to the build
-target_link_libraries(RPIPico_WS90_Decoder
+target_link_libraries(ESP32_WS90_Decoder_MQTT
         pico_stdlib)
 
 # Add the standard include files to the build
-target_include_directories(RPIPico_WS90_Decoder PRIVATE
+target_include_directories(ESP32_WS90_Decoder_MQTT PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
 # Add any user requested libraries
-target_link_libraries(RPIPico_WS90_Decoder 
+target_link_libraries(ESP32_WS90_Decoder_MQTT 
         hardware_spi
         hardware_dma
         hardware_pio
@@ -67,5 +67,5 @@ target_link_libraries(RPIPico_WS90_Decoder
         hardware_clocks
         )
 
-pico_add_extra_outputs(RPIPico_WS90_Decoder)
+pico_add_extra_outputs(ESP32_WS90_Decoder_MQTT)
 
