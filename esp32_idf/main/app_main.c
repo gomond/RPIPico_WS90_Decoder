@@ -17,9 +17,11 @@
 #include "driver/gpio.h"
 #include "esp_wifi.h"
 
-#define WIFI_SSID       "YOUR_WIFI_SSID"
-#define WIFI_PASS       "YOUR_WIFI_PASSWORD"
-#define MQTT_BROKER_URI "mqtt://192.168.1.10"
+#define WIFI_SSID       "Omond"
+#define WIFI_PASS       "D00fyD0g"
+#define MQTT_BROKER_URI "mqtt://192.168.1.238:1883"
+#define MQTT_USER       "mqtt-user"
+#define MQTT_PASS       "hassmqtt"
 
 #define MQTT_STATE_TOPIC "ws90/state"
 
@@ -489,7 +491,7 @@ static void wifi_init_sta(void) {
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
     (void)handler_args;
     (void)base;
-    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+    (void)event_data;
 
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
@@ -512,6 +514,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_start(void) {
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URI,
+        .credentials.username = MQTT_USER,
+        .credentials.authentication.password = MQTT_PASS,
     };
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -549,17 +553,8 @@ static void rfm_spi_init(void) {
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 }
 
-void app_main(void) {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    wifi_init_sta();
-    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    mqtt_start();
+static void ws90_radio_task(void *arg) {
+    (void)arg;
 
     rfm_spi_init();
     rfm_reset();
@@ -600,7 +595,23 @@ void app_main(void) {
                 ESP_LOGI(TAG, "alive: waiting packets");
                 heartbeat_ms = now_ms;
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
+}
+
+void app_main(void) {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    wifi_init_sta();
+    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    mqtt_start();
+
+    xTaskCreatePinnedToCore(ws90_radio_task, "ws90_radio", 8192, NULL, 5, NULL, 1);
 }
