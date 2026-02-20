@@ -2,6 +2,11 @@
 
 Decode FineOffset WS90 weather sensor packets on Raspberry Pi Pico using an RFM69 receiver.
 
+## ESP32 standalone project
+
+The fully functional ESP32-S3 ESP-IDF version is split into branch `esp32-idf-standalone`.
+Use that branch as the source for a separate GitHub project/repo dedicated to ESP32.
+
 ## What this project does
 
 - Receives WS90 packets around 433.92 MHz.
