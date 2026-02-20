@@ -23,12 +23,15 @@
 #define MQTT_USER       CONFIG_WS90_MQTT_USERNAME
 #define MQTT_PASS       CONFIG_WS90_MQTT_PASSWORD
 #define MQTT_STATE_TOPIC CONFIG_WS90_MQTT_STATE_TOPIC
+#define WS90_REQUIRE_EXPECTED_ID CONFIG_WS90_REQUIRE_EXPECTED_ID
+#define WS90_RADIO_DIAGNOSTICS   CONFIG_WS90_RADIO_DIAGNOSTICS
+#define WS90_DIAG_INTERVAL_MS    CONFIG_WS90_DIAG_INTERVAL_MS
 
-#define PIN_MISO 16
-#define PIN_MOSI 19
-#define PIN_SCK  18
-#define PIN_CS   17
-#define PIN_RST  20
+#define PIN_MISO 42
+#define PIN_MOSI 2
+#define PIN_SCK  1
+#define PIN_CS   41
+#define PIN_RST  4
 
 #define RFM69_REG_FIFO          0x00
 #define RFM69_REG_OPMODE        0x01
@@ -42,6 +45,7 @@
 #define RFM69_REG_FRFLSB        0x09
 #define RFM69_REG_RXBW          0x19
 #define RFM69_REG_AFCBW         0x1A
+#define RFM69_REG_RSSIVALUE     0x24
 #define RFM69_REG_DIOMAPPING1   0x25
 #define RFM69_REG_IRQFLAGS1     0x27
 #define RFM69_REG_IRQFLAGS2     0x28
@@ -63,11 +67,11 @@
 #define RADIO_BITRATE_BPS      17241u
 #define RADIO_FDEV_HZ          33500u
 #define RADIO_CENTER_HZ        433920000u
+#define RFM_SPI_CLOCK_HZ       4000000u
 
 #define WS90_FRAME_BYTES       32u
 #define RFM_CAPTURE_BYTES      32u
 #define WS90_EXPECTED_ID       0x00C0E4u
-#define WS90_REQUIRE_EXPECTED_ID 1
 #define HEARTBEAT_IDLE_MS      10000u
 
 static const char *TAG = "WS90_MQTT";
@@ -205,6 +209,52 @@ static void rfm_reset(void) {
     vTaskDelay(pdMS_TO_TICKS(10));
 }
 
+static bool rfm_spi_sanity_check(void) {
+    uint8_t reg0 = rfm_read(RFM69_REG_OPMODE);
+    uint8_t reg1 = rfm_read(RFM69_REG_DATAMODUL);
+    uint8_t reg2 = rfm_read(RFM69_REG_SYNCCONFIG);
+
+    bool all_zero = (reg0 == 0x00u) && (reg1 == 0x00u) && (reg2 == 0x00u);
+    bool all_ff = (reg0 == 0xFFu) && (reg1 == 0xFFu) && (reg2 == 0xFFu);
+
+    uint8_t original_sync1 = rfm_read(RFM69_REG_SYNCVALUE1);
+    const uint8_t pattern_a = 0x5Au;
+    const uint8_t pattern_b = 0xA5u;
+
+    rfm_write(RFM69_REG_SYNCVALUE1, pattern_a);
+    uint8_t read_a = rfm_read(RFM69_REG_SYNCVALUE1);
+    rfm_write(RFM69_REG_SYNCVALUE1, pattern_b);
+    uint8_t read_b = rfm_read(RFM69_REG_SYNCVALUE1);
+    rfm_write(RFM69_REG_SYNCVALUE1, original_sync1);
+
+    bool write_ok = (read_a == pattern_a) && (read_b == pattern_b);
+    bool sanity_ok = write_ok && !all_zero && !all_ff;
+
+    ESP_LOGI(TAG,
+             "rfm69 spi probe: op=0x%02X datamodul=0x%02X sync=0x%02X sync1_orig=0x%02X wrA=0x%02X wrB=0x%02X result=%s",
+             reg0,
+             reg1,
+             reg2,
+             original_sync1,
+             read_a,
+             read_b,
+             sanity_ok ? "PASS" : "FAIL");
+
+    if (!sanity_ok) {
+        if (all_zero) {
+            ESP_LOGE(TAG, "rfm69 spi probe fail: reads are all 0x00 (likely no SPI response or held low)");
+        }
+        if (all_ff) {
+            ESP_LOGE(TAG, "rfm69 spi probe fail: reads are all 0xFF (likely no SPI response or floating MISO)");
+        }
+        if (!write_ok) {
+            ESP_LOGE(TAG, "rfm69 spi probe fail: write/readback mismatch (wrA=0x%02X wrB=0x%02X)", read_a, read_b);
+        }
+    }
+
+    return sanity_ok;
+}
+
 static void rfm_init(void) {
     rfm_set_mode(RFM69_MODE_STDBY);
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -233,6 +283,31 @@ static void rfm_init(void) {
     rfm_write(RFM69_REG_RSSITHRESH, 0xB4);
     rfm_write(RFM69_REG_DIOMAPPING1, 0x00);
     rfm_set_mode(RFM69_MODE_RX);
+}
+
+static void rfm_log_diagnostics(uint32_t packet_count, uint32_t decode_count) {
+    uint8_t opmode = rfm_read(RFM69_REG_OPMODE);
+    uint8_t datamodul = rfm_read(RFM69_REG_DATAMODUL);
+    uint8_t syncconfig = rfm_read(RFM69_REG_SYNCCONFIG);
+    uint8_t irq1 = rfm_read(RFM69_REG_IRQFLAGS1);
+    uint8_t irq2 = rfm_read(RFM69_REG_IRQFLAGS2);
+    uint8_t packet_cfg1 = rfm_read(RFM69_REG_PACKETCONFIG1);
+    uint8_t payload_len = rfm_read(RFM69_REG_PAYLOADLENGTH);
+    uint8_t rssi_raw = rfm_read(RFM69_REG_RSSIVALUE);
+    int rssi_dbm = -((int)rssi_raw / 2);
+
+    ESP_LOGI(TAG,
+             "diag: op=0x%02X data=0x%02X sync=0x%02X irq1=0x%02X irq2=0x%02X pkt=0x%02X len=%u rssi=%d dBm pkt=%u ok=%u",
+             opmode,
+             datamodul,
+             syncconfig,
+             irq1,
+             irq2,
+             packet_cfg1,
+             payload_len,
+             rssi_dbm,
+             packet_count,
+             decode_count);
 }
 
 static uint8_t ws90_crc8(const uint8_t *data, size_t len, uint8_t poly, uint8_t init) {
@@ -378,7 +453,7 @@ static bool ws90_decode_and_publish(const uint8_t *b) {
     }
 
     int id = (b[1] << 16) | (b[2] << 8) | b[3];
-#if WS90_REQUIRE_EXPECTED_ID
+#if CONFIG_WS90_REQUIRE_EXPECTED_ID
     if (id != (int)WS90_EXPECTED_ID) {
         return false;
     }
@@ -627,7 +702,7 @@ static void rfm_spi_init(void) {
     };
 
     spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 4 * 1000 * 1000,
+        .clock_speed_hz = RFM_SPI_CLOCK_HZ,
         .mode = 0,
         .spics_io_num = PIN_CS,
         .queue_size = 1,
@@ -651,6 +726,12 @@ static void ws90_radio_task(void *arg) {
 
     rfm_spi_init();
     rfm_reset();
+
+    bool spi_ok = rfm_spi_sanity_check();
+    if (!spi_ok) {
+        ESP_LOGE(TAG, "RFM69 SPI check failed; continuing for diagnostics");
+    }
+
     rfm_init();
 
     uint8_t opmode = rfm_read(RFM69_REG_OPMODE);
@@ -668,6 +749,9 @@ static void ws90_radio_task(void *arg) {
     uint8_t frame[RFM_CAPTURE_BYTES];
     uint32_t heartbeat_ms = (uint32_t)esp_log_timestamp();
     uint32_t last_activity_ms = heartbeat_ms;
+    uint32_t last_diag_ms = heartbeat_ms;
+    uint32_t packet_count = 0;
+    uint32_t decode_count = 0;
 
     while (true) {
         uint8_t opm = rfm_read(RFM69_REG_OPMODE);
@@ -677,9 +761,11 @@ static void ws90_radio_task(void *arg) {
 
         uint8_t irq2 = rfm_read(RFM69_REG_IRQFLAGS2);
         if (irq2 & 0x04u) {
+            packet_count++;
             rfm_read_fifo(frame, RFM_CAPTURE_BYTES);
             bool decoded = handle_capture_bytes(frame, RFM_CAPTURE_BYTES);
             if (decoded) {
+                decode_count++;
                 last_activity_ms = (uint32_t)esp_log_timestamp();
             }
         } else {
@@ -688,6 +774,13 @@ static void ws90_radio_task(void *arg) {
                 ESP_LOGI(TAG, "alive: waiting packets");
                 heartbeat_ms = now_ms;
             }
+
+#if CONFIG_WS90_RADIO_DIAGNOSTICS
+            if ((now_ms - last_diag_ms) >= (uint32_t)WS90_DIAG_INTERVAL_MS) {
+                rfm_log_diagnostics(packet_count, decode_count);
+                last_diag_ms = now_ms;
+            }
+#endif
         }
 
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -695,18 +788,15 @@ static void ws90_radio_task(void *arg) {
 }
 
 void app_main(void) {
-    if (strlen(WIFI_SSID) == 0 || strlen(WIFI_PASS) == 0) {
-        ESP_LOGE(TAG, "Wi-Fi credentials missing. Set WS90_WIFI_SSID and WS90_WIFI_PASS in menuconfig.");
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+    bool wifi_ready = (strlen(WIFI_SSID) > 0) && (strlen(WIFI_PASS) > 0);
+    bool mqtt_ready = strlen(MQTT_BROKER_URI) > 0;
+
+    if (!wifi_ready) {
+        ESP_LOGW(TAG, "Wi-Fi credentials missing; running radio-only mode. Set WS90_WIFI_SSID and WS90_WIFI_PASS in menuconfig.");
     }
 
-    if (strlen(MQTT_BROKER_URI) == 0) {
-        ESP_LOGE(TAG, "MQTT broker URI missing. Set WS90_MQTT_BROKER_URI in menuconfig.");
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+    if (!mqtt_ready) {
+        ESP_LOGW(TAG, "MQTT broker URI missing; MQTT publish disabled. Set WS90_MQTT_BROKER_URI in menuconfig.");
     }
 
     esp_err_t ret = nvs_flash_init();
@@ -716,9 +806,13 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    wifi_init_sta();
-    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    mqtt_start();
+    if (wifi_ready) {
+        wifi_init_sta();
+        xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+        if (mqtt_ready) {
+            mqtt_start();
+        }
+    }
 
     xTaskCreatePinnedToCore(ws90_radio_task, "ws90_radio", 8192, NULL, 5, NULL, 1);
 }
