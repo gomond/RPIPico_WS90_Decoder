@@ -24,4 +24,18 @@ config WS90_MQTT_STATE_TOPIC
     string "MQTT State Topic"
     default "ws90/state"
 
+config WS90_REQUIRE_EXPECTED_ID
+    bool "Require expected WS90 station ID"
+    default y
+
+config WS90_RADIO_DIAGNOSTICS
+    bool "Enable periodic radio diagnostics"
+    default y
+
+config WS90_DIAG_INTERVAL_MS
+    int "Radio diagnostics interval (ms)"
+    range 500 60000
+    default 3000
+    depends on WS90_RADIO_DIAGNOSTICS
+
 endmenu
