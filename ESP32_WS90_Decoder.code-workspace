@@ -1,0 +1,10 @@
+{
+  "folders": [
+    {
+      "path": "esp32_idf"
+    }
+  ],
+  "settings": {
+    "idf.currentSetup": "C:\\Users\\gomond\\esp\\v5.5.2\\esp-idf"
+  }
+}
