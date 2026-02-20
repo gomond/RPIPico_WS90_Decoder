@@ -2,6 +2,11 @@
 
 ESP32 packet-mode WS90 decoder with MQTT publishing for Home Assistant.
 
+## Standalone repo note
+
+This ESP32 project is also available as a standalone split branch: `esp32-idf-standalone`.
+Use that branch to create a dedicated ESP32-only GitHub repository.
+
 ## Status
 
 - Packet-mode RFM69 receive path ported.
